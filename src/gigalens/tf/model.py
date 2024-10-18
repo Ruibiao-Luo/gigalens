@@ -32,9 +32,11 @@ class ForwardProbModel(gigalens.model.ProbabilisticModel):
             observed_image=None,
             background_rms=None,
             exp_time=None,
+            mask_image=None,
     ):
         super(ForwardProbModel, self).__init__(prior)
         self.observed_image = tf.constant(observed_image, dtype=tf.float32)
+        self.mask_image = tf.constant(mask_image, dtype=tf.float32) if mask_image is not None else tf.ones_like(self.observed_image)  # default mask = 1
         self.background_rms = tf.constant(background_rms, dtype=tf.float32)
         self.exp_time = tf.constant(float(exp_time), dtype=tf.float32)
         example = prior.sample(seed=0)
@@ -74,15 +76,17 @@ class ForwardProbModel(gigalens.model.ProbabilisticModel):
         """
         x = self.bij.forward(z)
         im_sim = simulator.simulate(x)
-        err_map = tf.math.sqrt(self.background_rms ** 2 + tf.clip_by_value(im_sim, 0, np.inf) / self.exp_time)
+        masked_observed_image = self.observed_image * self.mask_image
+        masked_im_sim = im_sim * self.mask_image
+        err_map = tf.math.sqrt(self.background_rms ** 2 + tf.clip_by_value(masked_im_sim, 0, np.inf) / self.exp_time)
         log_like = tfd.Independent(
-            tfd.Normal(im_sim, err_map), reinterpreted_batch_ndims=2
-        ).log_prob(self.observed_image)
+            tfd.Normal(masked_im_sim, err_map), reinterpreted_batch_ndims=2
+        ).log_prob(masked_observed_image)
         log_prior = self.prior.log_prob(
             x
         ) + self.unconstraining_bij.forward_log_det_jacobian(self.pack_bij.forward(z))
         return log_like + log_prior, tf.reduce_mean(
-            ((im_sim - self.observed_image) / err_map) ** 2, axis=(-2, -1)
+            ((masked_im_sim - masked_observed_image) / err_map) ** 2, axis=(-2, -1)
         )
 
 
@@ -107,17 +111,19 @@ class BackwardProbModel(gigalens.model.ProbabilisticModel):
     """
 
     def __init__(
-            self, prior: tfd.Distribution, observed_image, background_rms, exp_time
+            self, prior: tfd.Distribution, observed_image, background_rms, exp_time, mask_image=None,
     ):
         super(BackwardProbModel, self).__init__(prior)
         err_map = tf.math.sqrt(
-            background_rms ** 2 + tf.clip_by_value(observed_image, 0, np.inf) / exp_time
-        )
-        self.observed_dist = tfd.Independent(
-            tfd.Normal(observed_image, err_map), reinterpreted_batch_ndims=2
+            background_rms ** 2 + tf.clip_by_value(observed_image * mask_image, 0, np.inf) / exp_time
         )
         self.observed_image = tf.constant(observed_image, dtype=tf.float32)
+        self.mask_image = tf.constant(mask_image, dtype=tf.float32) if mask_image is not None else tf.ones_like(self.observed_image)  # default mask = 1
         self.err_map = tf.constant(err_map, dtype=tf.float32)
+        self.observed_dist = tfd.Independent(
+            tfd.Normal(self.observed_image * self.mask_image, self.err_map), 
+            reinterpreted_batch_ndims=2
+        )
         example = prior.sample(seed=0)
         size = int(tf.size(tf.nest.flatten(example)))
         self.pack_bij = tfb.Chain(
@@ -155,9 +161,10 @@ class BackwardProbModel(gigalens.model.ProbabilisticModel):
             The reparameterized log posterior density, with shape ``(bs,)``.
         """
         x = self.bij.forward(z)
-        im_sim = simulator.lstsq_simulate(x, self.observed_image, self.err_map)
+        masked_observed_image = self.observed_image * self.mask
+        im_sim = simulator.lstsq_simulate(x, masked_observed_image, self.err_map)
         log_like = self.observed_dist.log_prob(im_sim)
         log_prior = self.prior.log_prob(x) + self.unconstraining_bij.forward_log_det_jacobian(x)
         return log_like + log_prior, tf.reduce_mean(
-            ((im_sim - self.observed_image) / self.err_map) ** 2, axis=(-2, -1)
+            ((im_sim - masked_observed_image) / self.err_map) ** 2, axis=(-2, -1)
         )
