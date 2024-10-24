@@ -84,8 +84,8 @@ class ForwardProbModel(gigalens.model.ProbabilisticModel):
         x = self.bij.forward(z)
         im_sim = simulator.simulate(x)
         large_error = tf.reduce_max(self.background_rms) * 1e6 #use large error cover on the mask region
-        err_map = tf.math.sqrt(self.background_rms ** 2 + tf.clip_by_value(im_sim, 0, np.inf) / self.exp_time)
-        err_map = tf.where(self.mask_image > 0, err_map, large_error)
+        err_map_valid = tf.math.sqrt(self.background_rms ** 2 + tf.clip_by_value(im_sim, 0, np.inf) / self.exp_time)
+        err_map = tf.where(self.mask_image > 0, err_map_valid, large_error)
         log_like = tfd.Independent(
             tfd.Normal(im_sim, err_map), reinterpreted_batch_ndims=2
         ).log_prob(self.observed_image)
@@ -133,11 +133,11 @@ class BackwardProbModel(gigalens.model.ProbabilisticModel):
         )
         self.observed_image = tf.constant(masked_observed, dtype=tf.float32)
         large_error = tf.reduce_max(background_rms) * 1e6
-        self.err_map = tf.math.sqrt(
+        self.err_map_valid = tf.math.sqrt(
             background_rms ** 2 + 
             tf.clip_by_value(masked_observed, 0, np.inf) / exp_time
         )
-        self.err_map = tf.where(self.mask_image > 0, self.err_map, large_error)
+        self.err_map = tf.where(self.mask_image > 0, self.err_map_valid, large_error)
         self.observed_dist = tfd.Independent(
             tfd.Normal(self.observed_image, self.err_map),
             reinterpreted_batch_ndims=2
@@ -184,7 +184,7 @@ class BackwardProbModel(gigalens.model.ProbabilisticModel):
         valid_pixels = tf.cast(self.mask_image > 0, tf.float32)
         chi_squared = tf.reduce_sum(
             valid_pixels * ((im_sim - self.observed_image) / self.err_map) ** 2,
-            axis=[-2, -1]
+            axis=(-2, -1)
         ) / tf.reduce_sum(valid_pixels)
 
         log_prior = self.prior.log_prob(x) + self.unconstraining_bij.forward_log_det_jacobian(x)
